@@ -18,36 +18,16 @@
     }
   ],
   "hosting": {
-    "public": "weather-app/build",
-    "predeploy": [
-      "npm --prefix \"$RESOURCE_DIR/..\" run build"
-    ],
+    "source": "weather-app",
     "ignore": [
       "firebase.json",
       "**/.*",
       "**/node_modules/**"
     ],
-    "rewrites": [
-      {
-        "source": "api/stations/create",
-        "function": "stationApiCreate"
-      },
-      {
-        "source": "api/stations/update",
-        "function": "stationApiUpdate"
-      },
-      {
-        "source": "api/stations/delete",
-        "function": "stationApiDelete"
-      },
-      {
-        "source": "api/stations",
-        "function": "stationApiList"
-      },
-      {
-        "source": "api/stations/:id",
-        "function": "stationApiGet"
-      }
-    ]
+    "frameworksBackend": {
+      "region": "europe-west1",
+      "minInstances": 0,
+      "maxInstances": 5
+    }
   }
 }
