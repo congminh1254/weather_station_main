@@ -1,6 +1,8 @@
-#include <ESP8266WiFi.h>
 #include <Wire.h>
 #include <EEPROM.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClientSecureBearSSL.h>
 
 #define EEPROM_SIZE 512
 #define SSID_MAX_LENGTH 32
@@ -15,7 +17,9 @@ char pwd[PWD_MAX_LENGTH];
 
 unsigned long commandStartTime = 0;
 unsigned long blinkStartTime = 0;
-bool isConnected = false;
+
+HTTPClient http;
+std::unique_ptr<BearSSL::WiFiClientSecure> client(new BearSSL::WiFiClientSecure);
 
 void setup()
 {
@@ -23,6 +27,7 @@ void setup()
   Serial.begin(115200);
   Wire.begin(4, 5); // Initialize I2C communication (SDA - GPIO4, SCL - GPIO5)
   WiFi.hostname("WeatherStation");
+  client->setInsecure();
 
   readSettingsFromEEPROM(); // Read the saved settings from EEPROM
 }
@@ -32,10 +37,10 @@ void loop()
   // Check if there is any I2C data available
   if (Wire.available())
   {
-    char command[64];
+    char command[1024];
     byte commandLength = 0;
     commandStartTime = millis(); // Reset the command start time
-    while (commandLength < 63 && millis() - commandStartTime < COMMAND_TIMEOUT)
+    while (commandLength < 1024 && millis() - commandStartTime < COMMAND_TIMEOUT)
     {
       if (!Wire.available())
       {
@@ -56,10 +61,10 @@ void loop()
   // Check if there is any Serial data available
   if (Serial.available())
   {
-    char command[64];
+    char command[1024];
     byte commandLength = 0;
     commandStartTime = millis(); // Reset the command start time
-    while (commandLength < 63 && millis() - commandStartTime < COMMAND_TIMEOUT)
+    while (commandLength < 1024 && millis() - commandStartTime < COMMAND_TIMEOUT)
     {
       if (!Serial.available())
       {
@@ -78,10 +83,12 @@ void loop()
   }
 
   // Check network connection and blink LED if not connected
-  if (!isConnected && millis() - blinkStartTime >= LED_BLINK_INTERVAL)
+  if (!(WiFi.status() == WL_CONNECTED) && millis() - blinkStartTime >= LED_BLINK_INTERVAL)
   {
     digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN)); // Toggle LED state
     blinkStartTime = millis(); // Reset the blink start time
+  } else if (WiFi.status() == WL_CONNECTED) {
+    digitalWrite(LED_BUILTIN, LOW); // Turn on LED when connected
   }
 }
 
@@ -119,6 +126,17 @@ void executeCommand(const char *command)
     // Request to join the Wi-Fi network
     joinWiFi();
   }
+  else if (strcmp(command, "AT+LEAVE") == 0)
+  {
+    // Request to leave the Wi-Fi network
+    WiFi.disconnect();
+    sendResponse("OK");
+  }
+  else if (strcmp(command, "AT+IP") == 0)
+  {
+    // Return the IP address of the module
+    sendResponse(WiFi.localIP().toString().c_str());
+  }
   else if (strcmp(command, "AT+INTERNET") == 0)
   {
     // Return if there is an internet connection or not
@@ -126,6 +144,61 @@ void executeCommand(const char *command)
       sendResponse("Connected");
     else
       sendResponse("No internet connection");
+  }
+  else if (strcmp(command, "AT+NEWREQ") == 0)
+  {
+    // Start a new HTTP request
+    http = HTTPClient();
+    sendResponse("OK");
+  }
+  else if (strncmp(command, "AT+URL=", 7) == 0)
+  {
+    // Set the URL for the HTTP request
+    String url = String(command + 7);
+    http.begin(*client, url);
+    sendResponse("OK");
+  }
+  else if (strncmp(command, "AT+HEADER=", 10) == 0) {
+    // Add a header to the HTTP request
+    String headerName = String(command + 10);
+    int colonIndex = headerName.indexOf(':');
+    if (colonIndex == -1) {
+      sendResponse("Error: Invalid header");
+      return;
+    }
+    String headerValue = headerName.substring(colonIndex + 1);
+    headerName = headerName.substring(0, colonIndex);
+    http.addHeader(headerName.c_str(), headerValue.c_str());
+  }
+  else if (strcmp(command, "AT+GET") == 0)
+  {
+    // Send a GET request
+    int httpCode = http.GET();
+    sendResponse(String(httpCode).c_str());
+  }
+  else if (strncmp(command, "AT+POST=", 8) == 0)
+  {
+    // Send a POST request
+    int httpCode = http.POST(command + 8);
+    sendResponse(String(httpCode).c_str());
+  }
+  else if (strcmp(command, "AT+POST") == 0)
+  {
+    // Send a POST request
+    int httpCode = http.POST("");
+    sendResponse(String(httpCode).c_str());
+  }
+  else if (strcmp(command, "AT+READ") == 0)
+  {
+    // Read the response from the HTTP request
+    String response = http.getString();
+    sendResponse(response.c_str());
+  }
+  else if (strcmp(command, "AT+ENDREQ") == 0)
+  {
+    // End the HTTP request
+    http.end();
+    sendResponse("OK");
   }
   else
   {
@@ -228,7 +301,6 @@ bool joinWiFi()
   if (WiFi.status() == WL_CONNECTED)
   {
     // Connected to Wi-Fi network
-    isConnected = true;
     digitalWrite(LED_BUILTIN, LOW); // Turn on LED when connected
     sendResponse("Connected");
     return true;
@@ -236,7 +308,6 @@ bool joinWiFi()
   else
   {
     // Failed to connect
-    isConnected = false;
     digitalWrite(LED_BUILTIN, HIGH); // Turn off LED when not connected
 
     // Write the error code to I2C and Serial interfaces
@@ -273,8 +344,14 @@ bool checkInternetConnection()
 {
   // Code to check internet connection status
   // Replace with your implementation
+  if (WiFi.status() != WL_CONNECTED)
+    return false;
+  http = HTTPClient();
+  http.begin(*client, "https://www.google.com");
+  int httpCode = http.GET();
+  http.end();
 
-  // Placeholder implementation
-  delay(1000); // Simulating check delay
+  if (httpCode < 0)
+    return false;
   return true;
 }
