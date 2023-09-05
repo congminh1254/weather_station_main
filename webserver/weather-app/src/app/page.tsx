@@ -1,5 +1,11 @@
 import Image from 'next/image'
 import styles from './page.module.css'
+import { initializeApp } from '@firebase/app'
+import { getAuth } from 'firebase/auth'
+import { getFirebaseApp } from '@/core/utils'
+
+const app = getFirebaseApp();
+const auth = getAuth(app);
 
 export default function Home() {
   return (

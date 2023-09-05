@@ -24,11 +24,10 @@ std::unique_ptr<BearSSL::WiFiClientSecure> client(new BearSSL::WiFiClientSecure)
 void setup()
 {
   pinMode(LED_BUILTIN, OUTPUT); // Set LED_BUILTIN pin as OUTPUT
-  Serial.begin(115200);
+  Serial.begin(9600);
   Wire.begin(4, 5); // Initialize I2C communication (SDA - GPIO4, SCL - GPIO5)
   WiFi.hostname("WeatherStation");
   client->setInsecure();
-
   readSettingsFromEEPROM(); // Read the saved settings from EEPROM
 }
 
@@ -44,7 +43,7 @@ void loop()
     {
       if (!Wire.available())
       {
-        delay(1); // Wait for more I2C data to arrive
+        delay(1); // Wait for more I2C data to arrive 
         continue;
       }
       char c = Wire.read(); // Read the incoming I2C data

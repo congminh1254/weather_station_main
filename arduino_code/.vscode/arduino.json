@@ -1,6 +1,6 @@
 {
-    "configuration": "cpu=atmega328old",
+    "configuration": "cpu=atmega328",
     "board": "arduino:avr:nano",
-    "port": "/dev/tty.wchusbserial1420",
-    "sketch": "arduino_code.ino"
+    "port": "/dev/tty.wchusbserial1440",
+    "sketch": "master/master.ino"
 }
