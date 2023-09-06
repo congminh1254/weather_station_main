@@ -1,8 +1,14 @@
-#include <Wire.h>
+#define TINY_GSM_MODEM_SIM800
+// #if !defined(TINY_GSM_RX_BUFFER)
+// #define TINY_GSM_RX_BUFFER 300
+// #endif
+
 #include <SoftwareSerial.h>
 #include <EtherCard.h>
 #include <EEPROM.h>
-#include "SIM800L.h"
+#include <TinyGsmClient.h>
+#include <ArduinoHttpClient.h>
+
 
 // D10 - D13: SPI - Ethernet
 int bleRx = 5;
@@ -24,7 +30,8 @@ uint8_t Ethernet::buffer[300];
 static uint8_t ethMac[] = {0x74, 0x69, 0x69, 0x2D, 0x30, 0x31};
 char serialAnswer[128];
 
-SIM800L *sim800l;
+TinyGsm* sim800l;
+TinyGsmClient* sim800lclient;
 const char APN[] = "internet";
 
 struct MasterConfig
@@ -79,18 +86,18 @@ void loadDefaultConfig()
     strcpy(wifiConfig.ssid, "CGA2121_aaXyMrx");
     strcpy(wifiConfig.pwd, "dolna2a72");
   }
-  // if (strlen(simConfig.apn) == 0 && strlen(simConfig.user) == 0 && strlen(simConfig.pwd) == 0)
-  // {
-  //   strcpy(simConfig.apn, "internet");
-  //   strcpy(simConfig.user, "");
-  //   strcpy(simConfig.pwd, "");
-  // }
-  // if (strlen(loraConfig.devEui) == 0 && strlen(loraConfig.appEui) == 0 && strlen(loraConfig.appKey) == 0)
-  // {
-  //   strcpy(loraConfig.devEui, "6081F9F7B8151EE5");
-  //   strcpy(loraConfig.appEui, "6081F9E9F6B003F9");
-  //   strcpy(loraConfig.appKey, "55F5B1B2CE8DED19A3DB57FD976D9C05");
-  // }
+  if (strlen(simConfig.apn) == 0 && strlen(simConfig.user) == 0 && strlen(simConfig.pwd) == 0)
+  {
+    strcpy(simConfig.apn, "internet");
+    strcpy(simConfig.user, "");
+    strcpy(simConfig.pwd, "");
+  }
+  if (strlen(loraConfig.devEui) == 0 && strlen(loraConfig.appEui) == 0 && strlen(loraConfig.appKey) == 0)
+  {
+    strcpy(loraConfig.devEui, "6081F9F7B8151EE5");
+    strcpy(loraConfig.appEui, "6081F9E9F6B003F9");
+    strcpy(loraConfig.appKey, "55F5B1B2CE8DED19A3DB57FD976D9C05");
+  }
   writeMasterConfig();
 }
 
@@ -138,137 +145,90 @@ void readSoftSerial(SoftwareSerial *serial, int timeout)
 
 void setupSimModule()
 {
-  sim800l->setPowerMode(NORMAL);
-  while (!sim800l->isReady())
-  {
-    Serial.println(F("Problem to initialize AT command, retry in 1 sec"));
-    delay(1000);
-  }
-  // Active echo mode (for some module, it is required)
-  sim800l->enableEchoMode();
+    sim800l = new TinyGsm(sim);
+    sim800lclient = new TinyGsmClient(*sim800l);
 
-  // Wait for the GSM signal
-  uint8_t signal = sim800l->getSignal();
-  while (signal <= 0)
-  {
-    delay(1000);
-    signal = sim800l->getSignal();
-  }
-  Serial.print(F("Signal OK (strenght: "));
-  Serial.print(signal);
-  Serial.println(F(")"));
-  delay(1000);
-
-  // Wait for operator network registration (national or roaming network)
-  NetworkRegistration network = sim800l->getRegistrationStatus();
-  while (network != REGISTERED_HOME && network != REGISTERED_ROAMING)
-  {
-    delay(1000);
-    network = sim800l->getRegistrationStatus();
-  }
-  Serial.println(F("Network registration OK"));
-  delay(1000);
-
-  // Print version
-  Serial.print(F("Module "));
-  Serial.println(sim800l->getVersion());
-  Serial.print(F("Firmware "));
-  Serial.println(sim800l->getFirmware());
-
-  // Print SIM card status
-  Serial.print(F("SIM status "));
-  Serial.println(sim800l->getSimStatus());
-
-  // Print SIM card number
-  Serial.print(F("SIM card number "));
-  Serial.println(sim800l->getSimCardNumber());
-
-  // Setup APN for GPRS configuration
-  bool success = sim800l->setupGPRS(APN);
-  while (!success)
-  {
-    success = sim800l->setupGPRS(APN);
-    delay(5000);
-  }
-  Serial.println(F("GPRS config OK"));
+    sim800l->init();
+    Serial.print(F("Modem Info: "));
+    Serial.println(sim800l->getModemInfo());
+    Serial.print(F("Modem Name: "));
+    Serial.println(sim800l->getModemName());
+    Serial.print(F("Waiting for network: "));
+    if (!sim800l->waitForNetwork()) {
+      Serial.println(" fail");
+      delay(10000);
+      return;
+    }
+    Serial.println(" success");
+    if (sim800l->isNetworkConnected()) { Serial.println("Network connected"); }
 }
 
-void sendSimGetRequest(char* url, int timeout) {
-  Serial.println(F("Start HTTP GET..."));
-
-  // Do HTTP GET communication with 10s for the timeout (read)
-  
-  bool connected = false;
-  for (uint8_t i = 0; i < 5 && !connected; i++)
+void sendSimGetRequest(char* server, char* resource, int timeout) {
+  char* apn = "internet";
+  Serial.print(F("Connecting to "));
+  Serial.print(apn);
+  if (!sim800l->gprsConnect(apn, "", ""))
   {
-    delay(1000);
-    connected = sim800l->connectGPRS();
+     Serial.println(" fail");
+     return;
   }
+  Serial.println(" success");
+  if (sim800l->isGprsConnected()) { Serial.println("GPRS connected"); }
+  Serial.print(F("Local IP: "));
+  Serial.println(sim800l->getLocalIP());
+  Serial.print(F("Connecting to "));
+  Serial.print(server);
 
-  // Check if connected, if not reset the module and setup the config again
-  if (connected)
-  {
-    Serial.print(F("GPRS connected with IP "));
-    Serial.println(sim800l->getIP());
-  }
-  else
-  {
-    Serial.println(F("GPRS not connected !"));
-    Serial.println(F("Reset the module."));
-    sim800l->reset();
+  HttpClient http(*sim800lclient, server, 80);
+  http.setTimeout(timeout);
 
+  http.connectionKeepAlive();
+
+  int err = http.get(resource);
+  if (err != 0) {
+    Serial.println(F("failed to connect"));
+    sim800lclient->stop();
+    delay(10000);
     return;
   }
-  
-  Serial.println(F("Start HTTP GET..."));
 
-  // Do HTTP GET communication with 10s for the timeout (read)
-  uint16_t rc = sim800l->doGet(url, timeout);
-  if (rc == 200)
-  {
-    // Success, output the data received on the serial
-    Serial.print(F("HTTP GET successful ("));
-    Serial.print(sim800l->getDataSizeReceived());
-    Serial.println(F(" bytes)"));
-    Serial.print(F("Received : "));
-    Serial.println(sim800l->getDataReceived());
+  int status = http.responseStatusCode();
+  Serial.print(F("Response status code: "));
+  Serial.println(status);
+  if (status < 100) {
+    Serial.println(F("Request failed!"));
+    sim800lclient->stop();
+    http.stop();
+    sim800l->gprsDisconnect();
+    return;
   }
-  else
-  {
-    // Failed...
-    Serial.print(F("HTTP GET error "));
-    Serial.println(rc);
+  if (!status) {
+    delay(10000);
+    return;
   }
 
-  delay(1000);
-
-  // Close GPRS connectivity (5 trials)
-  bool disconnected = sim800l->disconnectGPRS();
-  for (uint8_t i = 0; i < 5 && !connected; i++)
-  {
-    delay(1000);
-    disconnected = sim800l->disconnectGPRS();
+  Serial.println(F("Response Headers:"));
+  while (http.headerAvailable()) {
+    String headerName  = http.readHeaderName();
+    String headerValue = http.readHeaderValue();
+    Serial.println("    " + headerName + " : " + headerValue);
   }
 
-  if (disconnected)
-  {
-    Serial.println(F("GPRS disconnected !"));
+  int length = http.contentLength();
+  if (length >= 0) {
+    Serial.print(F("Content length is: "));
+    Serial.println(length);
   }
-  else
-  {
-    Serial.println(F("GPRS still connected !"));
+  if (http.isResponseChunked()) {
+    Serial.println(F("The response is chunked"));
   }
+  Serial.println(F("Response:"));
+  Serial.println(http.responseBody());
 
-  // Go into low power mode
-  bool lowPowerMode = sim800l->setPowerMode(MINIMUM);
-  if (lowPowerMode)
-  {
-    Serial.println(F("Module in low power mode"));
-  }
-  else
-  {
-    Serial.println(F("Failed to switch module to low power mode"));
-  }
+  // Shutdown
+  http.stop();
+  Serial.println(F("Server disconnected"));
+  sim800l->gprsDisconnect();
 }
 
 void setup()
@@ -318,14 +278,9 @@ void setup()
   {
     sim.begin(9600);
     Serial.println(F("AT+LOG=Initializing SIM"));
-
-    sim800l = new SIM800L((Stream *)&sim, simReset, 200, 512);
-
-    Serial.println(F("Start of test protocol"));
     setupSimModule();
-    sendSimGetRequest("http://postman-echo.com/get", 10000);
-    // while(1);
-    Serial.println(F("End of test protocol"));
+    sendSimGetRequest("postman-echo.com", "/get", 10000);
+
     Serial.println(F("AT+LOG=SIM initialized"));
   }
   delay(1000);
