@@ -18,11 +18,11 @@
             "includePath": [
                 "/Users/congminh1254/Library/Arduino15/packages/arduino/hardware/avr/1.8.6/cores/arduino",
                 "/Users/congminh1254/Library/Arduino15/packages/arduino/hardware/avr/1.8.6/variants/eightanaloginputs",
-                "/Users/congminh1254/Library/Arduino15/packages/arduino/hardware/avr/1.8.6/libraries/Wire/src",
                 "/Users/congminh1254/Library/Arduino15/packages/arduino/hardware/avr/1.8.6/libraries/SoftwareSerial/src",
                 "/Users/congminh1254/Documents/Arduino/libraries/EtherCard/src",
                 "/Users/congminh1254/Library/Arduino15/packages/arduino/hardware/avr/1.8.6/libraries/EEPROM/src",
-                "/Users/congminh1254/Documents/Arduino/libraries/SIM800L_HTTP_connector/src",
+                "/Users/congminh1254/Documents/Arduino/libraries/TinyGSM/src",
+                "/Users/congminh1254/Documents/Arduino/libraries/ArduinoHttpClient/src",
                 "/Users/congminh1254/Library/Arduino15/packages/arduino/tools/avr-gcc/7.3.0-atmel3.6.1-arduino7/lib/gcc/avr/7.3.0/include",
                 "/Users/congminh1254/Library/Arduino15/packages/arduino/tools/avr-gcc/7.3.0-atmel3.6.1-arduino7/lib/gcc/avr/7.3.0/include-fixed",
                 "/Users/congminh1254/Library/Arduino15/packages/arduino/tools/avr-gcc/7.3.0-atmel3.6.1-arduino7/avr/include"

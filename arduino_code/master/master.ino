@@ -9,7 +9,6 @@
 #include <TinyGsmClient.h>
 #include <ArduinoHttpClient.h>
 
-
 // D10 - D13: SPI - Ethernet
 int bleRx = 5;
 int bleTx = 4;
@@ -28,10 +27,11 @@ SoftwareSerial lora(loraRx, loraTx);
 
 uint8_t Ethernet::buffer[300];
 static uint8_t ethMac[] = {0x74, 0x69, 0x69, 0x2D, 0x30, 0x31};
-char serialAnswer[128];
+char serialAnswer[150];
+unsigned long readTimeout = 0;
 
-TinyGsm* sim800l;
-TinyGsmClient* sim800lclient;
+TinyGsm *sim800l;
+TinyGsmClient *sim800lclient;
 const char APN[] = "internet";
 
 struct MasterConfig
@@ -41,10 +41,11 @@ struct MasterConfig
   bool wifiEnabled;
   bool loraEnabled;
   bool ethEnabled;
+  int stationId;
 
   String toString()
   {
-    return String(bleEnabled) + String(simEnabled) + String(wifiEnabled) + String(loraEnabled) + String(ethEnabled);
+    return "Station " + String(stationId) + " " + String(bleEnabled) + String(simEnabled) + String(wifiEnabled) + String(loraEnabled) + String(ethEnabled);
   }
 };
 struct WifiConfig
@@ -98,6 +99,10 @@ void loadDefaultConfig()
     strcpy(loraConfig.appEui, "6081F9E9F6B003F9");
     strcpy(loraConfig.appKey, "55F5B1B2CE8DED19A3DB57FD976D9C05");
   }
+  if (masterConfig.stationId < 1000)
+  {
+    masterConfig.stationId = random(1000, 9999);
+  }
   writeMasterConfig();
 }
 
@@ -115,9 +120,52 @@ void printMasterConfig()
   Serial.println(masterConfig.toString());
 }
 
+void trimSerialAnswer()
+{
+  // Trim trailing newline
+  if (serialAnswer[strlen(serialAnswer) - 1] == '\n')
+  {
+    serialAnswer[strlen(serialAnswer) - 1] = '\0';
+  }
+  // Trim trailing carriage return
+  if (serialAnswer[strlen(serialAnswer) - 1] == '\r')
+  {
+    serialAnswer[strlen(serialAnswer) - 1] = '\0';
+  }
+}
+
+void readSerial(int timeout)
+{
+  readTimeout = millis() + timeout;
+  memset(serialAnswer, 0, sizeof(serialAnswer));
+
+  // Read until newline or timeout
+  while (millis() < readTimeout)
+  {
+    if (Serial.available() > 0)
+    {
+      char ch = Serial.read();
+      if (ch == '\n')
+      {
+        break;
+      }
+      else
+      {
+        serialAnswer[strlen(serialAnswer)] = ch;
+      }
+    }
+    delay(1);
+  }
+  if (millis() >= readTimeout)
+  {
+    Serial.println(F("AT+LOG=Timeout while reading from serial"));
+  }
+  trimSerialAnswer();
+}
+
 void readSoftSerial(SoftwareSerial *serial, int timeout)
 {
-  unsigned long readTimeout = millis() + timeout;
+  readTimeout = millis() + timeout;
   memset(serialAnswer, 0, sizeof(serialAnswer));
 
   // Read until newline or timeout
@@ -141,42 +189,51 @@ void readSoftSerial(SoftwareSerial *serial, int timeout)
   {
     Serial.println(F("AT+LOG=Timeout while reading from soft serial"));
   }
+  trimSerialAnswer();
 }
 
 void setupSimModule()
 {
-    sim800l = new TinyGsm(sim);
-    sim800lclient = new TinyGsmClient(*sim800l);
+  sim800l = new TinyGsm(sim);
+  sim800lclient = new TinyGsmClient(*sim800l);
 
-    sim800l->init();
-    Serial.print(F("Modem Info: "));
-    Serial.println(sim800l->getModemInfo());
-    Serial.print(F("Modem Name: "));
-    Serial.println(sim800l->getModemName());
-    Serial.print(F("Waiting for network: "));
-    if (!sim800l->waitForNetwork()) {
-      Serial.println(" fail");
-      delay(10000);
-      return;
-    }
-    Serial.println(" success");
-    if (sim800l->isNetworkConnected()) { Serial.println("Network connected"); }
+  sim800l->init();
+  Serial.print(F("AT+LOG=Modem Info: "));
+  Serial.println(sim800l->getModemInfo());
+  Serial.print(F("AT+LOG=Modem Name: "));
+  Serial.println(sim800l->getModemName());
+  Serial.print(F("AT+LOG=Waiting for network: "));
+  if (!sim800l->waitForNetwork())
+  {
+    Serial.println(" fail");
+    delay(10000);
+    return;
+  }
+  Serial.println(" success");
+  if (sim800l->isNetworkConnected())
+  {
+    Serial.println("AT+LOG=Network connected");
+  }
 }
 
-void sendSimGetRequest(char* server, char* resource, int timeout) {
-  char* apn = "internet";
-  Serial.print(F("Connecting to "));
+void sendSimGetRequest(char *server, char *resource, int timeout)
+{
+  char *apn = "internet";
+  Serial.print(F("AT+LOG=Connecting to "));
   Serial.print(apn);
   if (!sim800l->gprsConnect(apn, "", ""))
   {
-     Serial.println(" fail");
-     return;
+    Serial.println(" fail");
+    return;
   }
   Serial.println(" success");
-  if (sim800l->isGprsConnected()) { Serial.println("GPRS connected"); }
-  Serial.print(F("Local IP: "));
+  if (sim800l->isGprsConnected())
+  {
+    Serial.println("AT+LOG=GPRS connected");
+  }
+  Serial.print(F("AT+LOG=Local IP: "));
   Serial.println(sim800l->getLocalIP());
-  Serial.print(F("Connecting to "));
+  Serial.print(F("AT+LOG=Connecting to "));
   Serial.print(server);
 
   HttpClient http(*sim800lclient, server, 80);
@@ -185,7 +242,8 @@ void sendSimGetRequest(char* server, char* resource, int timeout) {
   http.connectionKeepAlive();
 
   int err = http.get(resource);
-  if (err != 0) {
+  if (err != 0)
+  {
     Serial.println(F("failed to connect"));
     sim800lclient->stop();
     delay(10000);
@@ -193,33 +251,38 @@ void sendSimGetRequest(char* server, char* resource, int timeout) {
   }
 
   int status = http.responseStatusCode();
-  Serial.print(F("Response status code: "));
+  Serial.print(F("AT+LOG=Response status code: "));
   Serial.println(status);
-  if (status < 100) {
-    Serial.println(F("Request failed!"));
+  if (status < 100)
+  {
+    Serial.println(F("AT+LOG=Request failed!"));
     sim800lclient->stop();
     http.stop();
     sim800l->gprsDisconnect();
     return;
   }
-  if (!status) {
+  if (!status)
+  {
     delay(10000);
     return;
   }
 
   Serial.println(F("Response Headers:"));
-  while (http.headerAvailable()) {
-    String headerName  = http.readHeaderName();
+  while (http.headerAvailable())
+  {
+    String headerName = http.readHeaderName();
     String headerValue = http.readHeaderValue();
     Serial.println("    " + headerName + " : " + headerValue);
   }
 
   int length = http.contentLength();
-  if (length >= 0) {
+  if (length >= 0)
+  {
     Serial.print(F("Content length is: "));
     Serial.println(length);
   }
-  if (http.isResponseChunked()) {
+  if (http.isResponseChunked())
+  {
     Serial.println(F("The response is chunked"));
   }
   Serial.println(F("Response:"));
@@ -231,15 +294,131 @@ void sendSimGetRequest(char* server, char* resource, int timeout) {
   sim800l->gprsDisconnect();
 }
 
+const int MAX_LORA_LENGTH = 36;
+void sendLoraData(const char *data)
+{
+  // Lora package can send upto 51 bytes,
+  // so we need to split the message into multiple packages
+  // with format: x:y:deviceId:z with x is the current position of message,
+  // y is the total length of message, z is the message content
+  // length of each message is upto 36 bytes
+
+  int currentPos = 0;
+  int totalLength = strlen(data);
+  int timeTried = 0;
+  char buffer[totalLength + 1];
+  memcpy(buffer, data, totalLength);
+  buffer[totalLength] = '\0';
+
+  while (currentPos < totalLength)
+  {
+    if (currentPos > 0)
+    {
+      memset(serialAnswer, 0, sizeof(serialAnswer));
+      while (lora.available())
+        lora.read();
+      delay(1000);
+    }
+    Serial.print(F("AT+LOG=Sending :"));
+    lora.print("AT+CMSG=\"");
+    lora.print(currentPos);
+    lora.print(":");
+    lora.print(totalLength);
+    lora.print(":");
+    lora.print(masterConfig.stationId);
+    lora.print(":");
+
+    for (int i = currentPos; i < currentPos + MAX_LORA_LENGTH; i++)
+    {
+      if (buffer[i] == '"')
+        buffer[i] = '\'';
+      if (i < totalLength)
+      {
+        lora.print(buffer[i]);
+        Serial.print(buffer[i]);
+      }
+      else
+      {
+        break;
+      }
+    }
+    currentPos += MAX_LORA_LENGTH;
+
+    lora.println("\"");
+    Serial.println("");
+
+    timeTried = 0;
+    while ((strstr(serialAnswer, "Done") == NULL && strstr(serialAnswer, "ERROR") == NULL && strstr(serialAnswer, "error") == NULL) && timeTried < 10)
+    {
+      readSoftSerial(&lora, 3000);
+      Serial.print(F("AT+LOG=LORA response: "));
+      Serial.println(serialAnswer);
+      timeTried++;
+    }
+    // if (strstr(serialAnswer, "Done") == NULL == NULL)
+    // {
+    //   Serial.println(F("AT+LOG=Failed to send LORA data"));
+    // }
+    // else
+    // {
+    //   Serial.println(F("AT+LOG=LORA data sent"));
+    // }
+  }
+}
+
+void processATCommand()
+{
+  // AT+DATA=... : Data from Slave, need to send to server
+  // AT+LOG=... : Log from Slave, do nothing
+
+  if (strncmp(serialAnswer, "AT+DATA=", 8) == 0)
+  {
+    if (masterConfig.ethEnabled)
+    {
+      // Serial.println(F("AT+LOG=Sending data via Ethernet"));
+      // ether.packetLoop(ether.packetReceive());
+      // ether.httpPost("/data", dataBuffer, "application/json");
+      // Serial.println(F("AT+LOG=Data sent to server"));
+    }
+    if (masterConfig.simEnabled)
+    {
+      // Serial.println(F("AT+LOG=Sending data via SIM"));
+      // sendSimGetRequest("postman-echo.com", "/post", 10000);
+      // Serial.println(F("AT+LOG=Data sent to server"));
+    }
+    if (masterConfig.wifiEnabled)
+    {
+      // Serial.println(F("AT+LOG=Sending data via WIFI"));
+      // sendWifiPostRequest("postman-echo.com", "/post", 10000);
+      // Serial.println(F("AT+LOG=Data sent to server"));
+    }
+    if (masterConfig.loraEnabled)
+    {
+      Serial.println(F("AT+LOG=Sending data via LORA"));
+      sendLoraData(serialAnswer + 8);
+      Serial.println(F("AT+LOG=Data sent to server"));
+    }
+    if (masterConfig.bleEnabled)
+    {
+      // Serial.println(F("AT+LOG=Sending data via BLE"));
+      // sendBlePostRequest("postman-echo.com", "/post", 10000);
+      // Serial.println(F("AT+LOG=Data sent to server"));
+    }
+  }
+  else if (strncmp(serialAnswer, "AT+LOG=", 7) == 0)
+  {
+  }
+}
+
 void setup()
 {
   Serial.begin(9600);
   readMasterConfig();
   masterConfig.loraEnabled = true;
   masterConfig.wifiEnabled = true;
-  masterConfig.ethEnabled = true;
+  masterConfig.ethEnabled = false;
   masterConfig.bleEnabled = true;
-  masterConfig.simEnabled = true;
+  masterConfig.simEnabled = false;
   printMasterConfig();
 
   if (masterConfig.ethEnabled)
@@ -265,10 +444,12 @@ void setup()
     readSoftSerial(&ble, 1000);
     Serial.print(F("AT+LOG=BLE response: "));
     Serial.println(serialAnswer);
-    if (strstr(serialAnswer, "OK") == NULL) {
+    if (strstr(serialAnswer, "OK") == NULL)
+    {
       Serial.println(F("AT+LOG=Failed to initialize BLE"));
     }
-    else {
+    else
+    {
       Serial.println(F("AT+LOG=BLE initialized"));
     }
   }
@@ -335,10 +516,10 @@ void setup()
   if (masterConfig.loraEnabled)
   {
     lora.begin(9600);
-    Serial.println("AT+LOG=Initializing LORA");
+    Serial.println(F("AT+LOG=Initializing LORA"));
     lora.print("AT\n");
     readSoftSerial(&lora, 1000);
-    Serial.print("AT+LOG=LORA response: ");
+    Serial.print(F("AT+LOG=LORA response: "));
     Serial.println(serialAnswer);
     if (strstr(serialAnswer, "OK") == NULL)
     {
@@ -358,70 +539,63 @@ void setup()
       Serial.println(F("AT+LOG=LORA initialized"));
     }
   }
+  memset(serialAnswer, 0, sizeof(serialAnswer));
   delay(1000);
   Serial.println(F("AT+LOG=Setup complete"));
 }
 
 void loop()
 {
-  // lcd.clear();
-
-  // windSpdSensorVal = analogRead(windSpdPin1);
-  // windSpeed = map(windSpdSensorVal, 0, 1023, 0, 300);
-  // windSpeed = windSpeed / 10;
-  // lcd.setCursor(0, 0);
-  // lcd.print("Speed: ");
-  // lcd.print(windSpeed);
-
-  // windDirSensorVal = analogRead(windDirPin1);
-  // windDirection = map(windDirSensorVal, 0, 1024, 0, 5);
-  // lcd.setCursor(0, 1);
-  // lcd.print("Direction: ");
-  // lcd.print(windDirection);
-
-  // if (isnan(humidity) || isnan(temperature)) {
-  //   Serial.println("Failed to read from DHT sensor!");
-  // }
-  // else {
-  //   humidity = dht.readHumidity();
-  //   lcd.setCursor(0, 2);
-  //   lcd.print("Humidity: ");
-  //   lcd.print(humidity);
-  //   lcd.print("%");
-
-  //   temperature = dht.readTemperature();
-  //   lcd.setCursor(0, 3);
-  //   lcd.print("Temperature: ");
-  //   lcd.print(temperature);
-  //   lcd.print(char(223));
-  //   lcd.print("C");
-  // }
-  // delay(500);
-
-  // Khi máy tính gửi dữ liệu cho mình
-  // if (Serial.available() > 0) {
-  //   Serial.print(F("May tinh gui: "));
-  //   while (Serial.available() > 0) {// in hết nội dung mà máy tính gửi cho mình, đồng thời gửi cho arduino thứ 2
-  //     char ch = Serial.read(); //đọc ký tự đầu tiên trogn buffer
-  //     Serial.write(ch); //xuất ra monitor máy tính
-  //     wifi.write(ch); //gửi dữ liệu cho Arduino thứ 2
-  //     delay(3);
-  //   }
-  //   Serial.println();
-  // }
-
-  // if (wifi.available() > 0) {
-  //   Serial.println(F("Serial thu 2 gui gia tri: "));
-  //   //đọc giá trị từ Arduino nếu có
-  //   delay(20);
-  //   while (wifi.available() > 0) {
-  //     char ch = wifi.read(); //đọc
-  //     Serial.write(ch); //xuất ra monitor
-  //     delay(3);
-  //   }
-  //   Serial.println();
-  // }
-
-  // Serial.write("AT\r\n");
-  // delay(1000);
+  if (masterConfig.ethEnabled)
+  {
+    ether.packetLoop(ether.packetReceive());
+  }
+  if (serialAnswer[0] == 0)
+  {
+    if (Serial.available() > 0)
+    {
+      Serial.print(F("AT+LOG=Serial: "));
+      readSerial(1000);
+    }
+  }
+  if (masterConfig.bleEnabled && serialAnswer[0] == 0)
+  {
+    if (ble.available() > 0)
+    {
+      Serial.print(F("AT+LOG=BLE: "));
+      readSoftSerial(&ble, 1000);
+    }
+  }
+  if (masterConfig.simEnabled && serialAnswer[0] == 0)
+  {
+    if (sim.available() > 0)
+    {
+      Serial.print(F("AT+LOG=SIM: "));
+      readSoftSerial(&sim, 1000);
+    }
+  }
+  if (masterConfig.wifiEnabled && serialAnswer[0] == 0)
+  {
+    if (wifi.available() > 0)
+    {
+      Serial.print(F("AT+LOG=WIFI: "));
+      readSoftSerial(&wifi, 1000);
+    }
+  }
+  if (masterConfig.loraEnabled && serialAnswer[0] == 0)
+  {
+    if (lora.available() > 0)
+    {
+      Serial.print(F("AT+LOG=LORA: "));
+      readSoftSerial(&lora, 1000);
+    }
+  }
+  if (strlen(serialAnswer) > 0)
+  {
+    Serial.print(F("AT+LOG=Serial: "));
+    Serial.println(serialAnswer);
+    processATCommand();
+    memset(serialAnswer, 0, sizeof(serialAnswer));
+  }
+  delay(10);
 }
