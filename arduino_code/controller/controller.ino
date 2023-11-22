@@ -44,7 +44,7 @@ SoftwareSerial simSerial(10, 11);  // RX, TX
 
 char serialAnswer[700];
 ATMessageSource messageSource;
-char dataBuffer[500], loraBuffer[500];
+char dataBuffer[500], loraBuffer[500], wifiBuffer[500], simBuffer[500];
 int windSpdSensorVal[maxWindSensor]; // Wind speed sensor output
 int windDirSensorVal[maxWindSensor]; // Wind direction sensor output
 float windSpeed[maxWindSensor];
@@ -55,6 +55,7 @@ float temperature[maxDhtSensor];
 unsigned long nextSendTime = 0, readSensorTime = 0;
 unsigned long readTimeout = 0;
 int readTried = 0;
+int serialAvailable = 0;
 
 // GPS Configuration
 TinyGsm *sim800l;
@@ -69,6 +70,11 @@ bool loraSending = false;
 int loraCurrentPos = 0;
 unsigned long loraSendTimeout = 0;
 
+// Wifi Configuration
+bool wifiSending = false;
+int wifiCurrentStep = 0;
+unsigned long wifiSendTimeout = 0;
+
 byte ethMac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
 
 LiquidCrystal_I2C lcd(0x27, 20, 4);
@@ -82,6 +88,11 @@ DHT dht[maxDhtSensor] = {
     {7, DHT_TYPE},
     {8, DHT_TYPE},
     {9, DHT_TYPE}};
+
+const char serverProtocol[] = "http";
+const char serverSecuredProtocol[] = "https";
+const char serverHost[] = "weather-api.ncminh.dev";
+const char serverAddWeatherDataPath[] = "/weatherData";
 
 struct SensorsConfig
 {
@@ -113,6 +124,16 @@ struct LoraConfig
   char appEui[16];
   char appKey[32];
 };
+struct LocationInfo
+{
+  double lat;
+  double lon;
+
+  String toString()
+  {
+    return "LocationInfo=" + String(lat) + "," + String(lon);
+  }
+};
 
 struct CommunicationConfig
 {
@@ -127,6 +148,8 @@ struct CommunicationConfig
   bool ethEnabled;
   int stationId;
   long sendInterval;
+
+  LocationInfo lastLocation;
 
   String toString()
   {
@@ -192,9 +215,11 @@ void loadDefaultCommunicationConfig()
   strcpy(comConfig.simConfig.apn, "internet");
   strcpy(comConfig.simConfig.user, "");
   strcpy(comConfig.simConfig.pwd, "");
+
   strcpy(comConfig.loraConfig.devEui, "6081F9F7B8151EE5");
   strcpy(comConfig.loraConfig.appEui, "6081F9E9F6B003F9");
   strcpy(comConfig.loraConfig.appKey, "55F5B1B2CE8DED19A3DB57FD976D9C05");
+
   comConfig.stationId = random(1000, 9999);
   comConfig.sendInterval = 60000;
   saveComConfig();
@@ -258,24 +283,49 @@ void printGps()
   }
   else
   {
-    Serial.println(F("AT+LOG=Location not valid"));
+    Serial.print(F("AT+LOG=Cached Latitude: "));
+    Serial.print(comConfig.lastLocation.lat, 6);
+    Serial.print(F(" Longitude: "));
+    Serial.println(comConfig.lastLocation.lon, 6);
   }
 }
 
-struct tm t = {0};
+LocationInfo getGps()
+{
+  LocationInfo location;
+  if (gps.location.isValid())
+  {
+    location.lat = gps.location.lat();
+    location.lon = gps.location.lng();
+  }
+  else
+  {
+    location.lat = comConfig.lastLocation.lat;
+    location.lon = comConfig.lastLocation.lon;
+  }
+  return location;
+}
+
+// struct tm t = {0};
 
 void sendData()
 {
   printGps();
-  t.tm_year = gps.date.year() - 1870;
-  t.tm_mon = gps.date.month() - 1;
-  t.tm_mday = gps.date.day();
-  t.tm_hour = gps.time.hour();
-  t.tm_min = gps.time.minute();
-  t.tm_sec = gps.time.second();
-  time_t timeSinceEpoch = mktime(&t) - 86400;
-  // Serial.println(timeSinceEpoch);
-  String data = "{\"ts\":" + String(timeSinceEpoch) + ",\"loc\":{\"lat\":" + String(gps.location.lat(), 6) + ",\"lon\":" + String(gps.location.lng(), 6) + "},\"data\":{";
+
+  // With timestamp
+  // t.tm_year = gps.date.year() - 1870;
+  // t.tm_mon = gps.date.month() - 1;
+  // t.tm_mday = gps.date.day();
+  // t.tm_hour = gps.time.hour();
+  // t.tm_min = gps.time.minute();
+  // t.tm_sec = gps.time.second();
+  // time_t timeSinceEpoch = mktime(&t) - 86400;
+  // String data = "{\"ts\":" + String(timeSinceEpoch) + ",\"loc\":{\"lat\":" + String(gps.location.lat(), 6) + ",\"lon\":" + String(gps.location.lng(), 6) + "},\"data\":{";
+
+  // Without timestamp
+  LocationInfo location = getGps();
+  String data = "{\"loc\":{\"lat\":" + String(location.lat, 6) + ",\"lon\":" + String(location.lon, 6) + "},\"data\":{";
+
   data += "\"ws\":[";
   for (int i = 0; i < 8; i++)
   {
@@ -327,10 +377,19 @@ void sendData()
   if (comConfig.simEnabled)
   {
     // Send data to SIM
+    memset(simBuffer, 0, sizeof(simBuffer));
+    memcpy(simBuffer, data.c_str(), data.length());
+    sendSimData();
   }
   if (comConfig.wifiEnabled)
   {
     // Send data to WIFI
+    wifiCurrentStep = 0;
+    wifiSending = true;
+    memset(wifiBuffer, 0, sizeof(wifiBuffer));
+    memcpy(wifiBuffer, data.c_str(), data.length());
+    wifiSendTimeout = millis() + 120000;
+    sendWifiData();
   }
   if (comConfig.loraEnabled)
   {
@@ -348,7 +407,7 @@ void sendData()
   }
 }
 
-void resetLoraData() 
+void resetLoraData()
 {
   loraSending = false;
   loraCurrentPos = 0;
@@ -407,6 +466,129 @@ void sendLoraData()
   }
 }
 
+void resetWifiData()
+{
+  wifiSending = false;
+  wifiCurrentStep = 0;
+  memset(wifiBuffer, 0, sizeof(wifiBuffer));
+}
+
+void sendWifiData()
+{
+  switch (wifiCurrentStep)
+  {
+  case 0:
+    Serial.println(F("AT+LOG=Sending WIFI data"));
+    wifiSending = true;
+    wifiSerial.print("AT+NEWREQ\n");
+    break;
+  case 1:
+    wifiSerial.print("AT+URL=" + String(serverSecuredProtocol) + "://" + String(serverHost) + String(serverAddWeatherDataPath) + "?stationId=" + String(comConfig.stationId) + "&source=wifi\n");
+    Serial.print("AT+URL=" + String(serverSecuredProtocol) + "://" + String(serverHost) + String(serverAddWeatherDataPath) + "?stationId=" + String(comConfig.stationId) + "&source=wifi\n");
+    break;
+  case 2:
+    wifiSerial.print("AT+HEADER=content-type:application/json\n");
+    Serial.print("AT+HEADER=content-type:application/json\n");
+    break;
+  case 3:
+    wifiSerial.print("AT+POST=" + String(wifiBuffer) + "\n");
+    Serial.print("AT+POST=" + String(wifiBuffer) + "\n");
+    break;
+  case 4:
+    wifiSerial.print("AT+READ\n");
+    break;
+  case 5:
+    wifiSerial.print("AT+ENDREQ\n");
+    break;
+  case 6:
+    Serial.println(F("AT+LOG=WIFI data sent"));
+    resetWifiData();
+    break;
+  }
+  delay(50);
+}
+
+void resetSimData()
+{
+  memset(simBuffer, 0, sizeof(simBuffer));
+}
+
+void sendSimData()
+{
+  Serial.print(F("AT+LOG=Connecting to "));
+  Serial.println(comConfig.simConfig.apn);
+  if (!sim800l->gprsConnect(comConfig.simConfig.apn, comConfig.simConfig.user, comConfig.simConfig.pwd))
+  {
+    Serial.println(" fail");
+    return;
+  }
+  Serial.println(" success");
+  if (sim800l->isGprsConnected())
+  {
+    Serial.println("AT+LOG=GPRS connected");
+  }
+  Serial.print(F("AT+LOG=Local IP: "));
+  Serial.println(sim800l->getLocalIP());
+  Serial.print(F("AT+LOG=Connecting to "));
+  Serial.println(serverHost);
+
+  HttpClient http(*sim800lclient, serverHost, 80);
+  http.setTimeout(60000);
+  http.connectionKeepAlive();
+
+  int err = http.post(serverAddWeatherDataPath + String("?stationId=") + String(comConfig.stationId) + String("&source=cellular"), "application/json", simBuffer);
+  if (err != 0)
+  {
+    Serial.println(F("failed to connect"));
+    sim800lclient->stop();
+    delay(10000);
+    return;
+  }
+
+  int status = http.responseStatusCode();
+  Serial.print(F("AT+LOG=Response status code: "));
+  Serial.println(status);
+  if (status < 100)
+  {
+    Serial.println(F("AT+LOG=Request failed!"));
+    sim800lclient->stop();
+    http.stop();
+    sim800l->gprsDisconnect();
+    return;
+  }
+  if (!status)
+  {
+    delay(10000);
+    return;
+  }
+
+  // Serial.println(F("Response Headers:"));
+  // while (http.headerAvailable())
+  // {
+  //   String headerName = http.readHeaderName();
+  //   String headerValue = http.readHeaderValue();
+  //   Serial.println("    " + headerName + " : " + headerValue);
+  // }
+
+  int length = http.contentLength();
+  if (length >= 0)
+  {
+    Serial.print(F("AT+LOG=Content length is: "));
+    Serial.println(length);
+  }
+  if (http.isResponseChunked())
+  {
+    Serial.println(F("AT+LOG=The response is chunked"));
+  }
+  Serial.print(F("AT+LOG=Response:"));
+  Serial.println(http.responseBody());
+
+  // Shutdown
+  http.stop();
+  Serial.println(F("AT+LOG=Server disconnected"));
+  sim800l->gprsDisconnect();
+}
+
 void processATCommand()
 {
   if (messageSource == ATMessageSource::AT_Serial)
@@ -419,7 +601,9 @@ void processATCommand()
     {
       // TODO: Implement config
     }
-  } else if (messageSource == ATMessageSource::AT_LORA) {
+  }
+  else if (messageSource == ATMessageSource::AT_LORA)
+  {
     // Start with +CMSG: Log from sending LORA packet
     lowerCaseSerialAnswer();
     if (strstr(serialAnswer, "+cmsg:") != NULL)
@@ -428,7 +612,7 @@ void processATCommand()
       {
         Serial.println(F("AT+LOG=LORA data sent"));
         if (loraSending)
-        sendLoraData();
+          sendLoraData();
       }
       else if (strstr(serialAnswer, "error") != NULL)
       {
@@ -439,6 +623,15 @@ void processATCommand()
       {
         // Another message, can be ignored
       }
+    }
+  }
+  else if (messageSource == ATMessageSource::AT_WIFI)
+  {
+    // Start with +CMSG: Log from sending WIFI packet
+    if (wifiSending)
+    {
+      wifiCurrentStep++;
+      sendWifiData();
     }
   }
 }
@@ -473,9 +666,11 @@ void readSerial(Stream *serial, int timeout)
   // Read until newline or timeout
   while (millis() < readTimeout)
   {
-    if (serial->available() > 0)
+    serialAvailable = serial->available();
+    char ch = '\0';
+    while (--serialAvailable >= 0)
     {
-      char ch = serial->read();
+      ch = serial->read();
       if (ch == '\n')
       {
         break;
@@ -484,13 +679,17 @@ void readSerial(Stream *serial, int timeout)
       {
         serialAnswer[strlen(serialAnswer)] = ch;
       }
+      delay(1);
     }
-    delay(1);
+    if (ch == '\n')
+      break;
+    delay(5);
   }
   if (millis() >= readTimeout)
   {
     Serial.println(F("AT+LOG=Timeout while reading from serial"));
   }
+  serial->flush();
   trimSerialAnswer();
 }
 
@@ -520,80 +719,80 @@ void setupSimModule()
 
 void sendSimGetRequest(char *server, char *resource, int timeout)
 {
-  char *apn = "internet";
-  Serial.print(F("AT+LOG=Connecting to "));
-  Serial.print(apn);
-  if (!sim800l->gprsConnect(apn, "", ""))
-  {
-    Serial.println(" fail");
-    return;
-  }
-  Serial.println(" success");
-  if (sim800l->isGprsConnected())
-  {
-    Serial.println("AT+LOG=GPRS connected");
-  }
-  Serial.print(F("AT+LOG=Local IP: "));
-  Serial.println(sim800l->getLocalIP());
-  Serial.print(F("AT+LOG=Connecting to "));
-  Serial.print(server);
+  // char *apn = "internet";
+  // Serial.print(F("AT+LOG=Connecting to "));
+  // Serial.print(apn);
+  // if (!sim800l->gprsConnect(apn, "", ""))
+  // {
+  //   Serial.println(" fail");
+  //   return;
+  // }
+  // Serial.println(" success");
+  // if (sim800l->isGprsConnected())
+  // {
+  //   Serial.println("AT+LOG=GPRS connected");
+  // }
+  // Serial.print(F("AT+LOG=Local IP: "));
+  // Serial.println(sim800l->getLocalIP());
+  // Serial.print(F("AT+LOG=Connecting to "));
+  // Serial.print(server);
 
-  HttpClient http(*sim800lclient, server, 80);
-  http.setTimeout(timeout);
+  // HttpClient http(*sim800lclient, server, 80);
+  // http.setTimeout(timeout);
 
-  http.connectionKeepAlive();
+  // http.connectionKeepAlive();
 
-  int err = http.get(resource);
-  if (err != 0)
-  {
-    Serial.println(F("failed to connect"));
-    sim800lclient->stop();
-    delay(10000);
-    return;
-  }
+  // int err = http.get(resource);
+  // if (err != 0)
+  // {
+  //   Serial.println(F("failed to connect"));
+  //   sim800lclient->stop();
+  //   delay(10000);
+  //   return;
+  // }
 
-  int status = http.responseStatusCode();
-  Serial.print(F("AT+LOG=Response status code: "));
-  Serial.println(status);
-  if (status < 100)
-  {
-    Serial.println(F("AT+LOG=Request failed!"));
-    sim800lclient->stop();
-    http.stop();
-    sim800l->gprsDisconnect();
-    return;
-  }
-  if (!status)
-  {
-    delay(10000);
-    return;
-  }
+  // int status = http.responseStatusCode();
+  // Serial.print(F("AT+LOG=Response status code: "));
+  // Serial.println(status);
+  // if (status < 100)
+  // {
+  //   Serial.println(F("AT+LOG=Request failed!"));
+  //   sim800lclient->stop();
+  //   http.stop();
+  //   sim800l->gprsDisconnect();
+  //   return;
+  // }
+  // if (!status)
+  // {
+  //   delay(10000);
+  //   return;
+  // }
 
-  Serial.println(F("Response Headers:"));
-  while (http.headerAvailable())
-  {
-    String headerName = http.readHeaderName();
-    String headerValue = http.readHeaderValue();
-    Serial.println("    " + headerName + " : " + headerValue);
-  }
+  // Serial.println(F("Response Headers:"));
+  // while (http.headerAvailable())
+  // {
+  //   String headerName = http.readHeaderName();
+  //   String headerValue = http.readHeaderValue();
+  //   Serial.println("    " + headerName + " : " + headerValue);
+  // }
 
-  int length = http.contentLength();
-  if (length >= 0)
-  {
-    Serial.print(F("Content length is: "));
-    Serial.println(length);
-  }
-  if (http.isResponseChunked())
-  {
-    Serial.println(F("The response is chunked"));
-  }
-  Serial.println(F("Response:"));
-  Serial.println(http.responseBody());
+  // int length = http.contentLength();
+  // if (length >= 0)
+  // {
+  //   Serial.print(F("Content length is: "));
+  //   Serial.println(length);
+  // }
+  // if (http.isResponseChunked())
+  // {
+  //   Serial.println(F("The response is chunked"));
+  // }
+  // Serial.println(F("Response:"));
+  // Serial.println(http.responseBody());
 
-  // Shutdown
-  http.stop();
-  Serial.println(F("Server disconnected"));
-  sim800l->gprsDisconnect();
+  // // Shutdown
+  // http.stop();
+  // Serial.println(F("Server disconnected"));
+  // sim800l->gprsDisconnect();
 }
 
 void clearLCDLine(int line)
@@ -618,7 +817,7 @@ void setup()
   comConfig.simEnabled = false;
   comConfig.wifiEnabled = true;
   comConfig.loraEnabled = true;
-  comConfig.ethEnabled = true;
+  comConfig.ethEnabled = false;
   saveComConfig();
 
   // Initialize LCD
@@ -630,7 +829,7 @@ void setup()
   clearLCDLine(1);
   lcd.setCursor(0, 1);
   lcd.print("Initializing...");
-
+  
   // Initialize sensors
   Wire.begin();
   for (auto &sensor : dht)
@@ -648,7 +847,6 @@ void setup()
   // loraSerial.begin(9600);
 
   // Initialize Communication
-
   if (comConfig.ethEnabled)
   {
     clearLCDLine(1);
@@ -709,12 +907,12 @@ void setup()
   {
     clearLCDLine(1);
     lcd.setCursor(0, 1);
+
     lcd.print("Initializing SIM");
     simSerial.begin(9600);
+    
     Serial.println(F("AT+LOG=Initializing SIM"));
     setupSimModule();
-    sendSimGetRequest("postman-echo.com", "/get", 10000);
-
     Serial.println(F("AT+LOG=SIM initialized"));
     deviceState.simInitialized = true;
   }
@@ -725,7 +923,7 @@ void setup()
     clearLCDLine(1);
     lcd.setCursor(0, 1);
     lcd.print("Initializing WIFI");
-    wifiSerial.begin(9600);
+    wifiSerial.begin(38400);
     Serial.println(F("AT+LOG=Initializing WIFI"));
     Serial.println(F("AT+LOG=Sending AT"));
     wifiSerial.print("AT\n");
@@ -791,7 +989,7 @@ void setup()
       loraSerial.print("AT+JOIN\n");
       readSerial(&loraSerial, 1000);
       readTried = 1;
-      while (readTried < 5 && strstr(serialAnswer, "Joined") == NULL && strstr(serialAnswer, "joined") == NULL && strstr(serialAnswer, "failed") == NULL)
+      while (readTried < 10 && strstr(serialAnswer, "Joined") == NULL && strstr(serialAnswer, "joined") == NULL && strstr(serialAnswer, "failed") == NULL)
       {
         Serial.print(F("AT+LOG=LORA response: "));
         Serial.println(serialAnswer);
@@ -812,8 +1010,10 @@ void setup()
   }
 
   lcd.setCursor(0, 1);
-  lcd.print("BLE: " + String(deviceState.bleInitialized) + " SIM: " + String(deviceState.simInitialized) + " WIFI: " + String(deviceState.wifiInitialized) + " LORA: " + String(deviceState.loraInitialized) + " ETH: " + String(deviceState.ethInitialized));
-  delay(2000);
+  lcd.print("BLE:" + String(deviceState.bleInitialized) + " SIM:" + String(deviceState.simInitialized) + " WIFI:" + String(deviceState.wifiInitialized));
+  lcd.setCursor(0, 2);
+  lcd.print("LORA:" + String(deviceState.loraInitialized) + " ETH:" + String(deviceState.ethInitialized));
+  delay(5000);
   nextSendTime = millis() + 10000; // First send after 10 seconds
 }
 
@@ -928,15 +1128,15 @@ void loop()
       messageSource = ATMessageSource::AT_BLE;
     }
   }
-  if (comConfig.simEnabled && serialAnswer[0] == 0)
-  {
-    if (simSerial.available() > 0)
-    {
-      Serial.print(F("AT+LOG=SIM: "));
-      readSerial(&simSerial, 1000);
-      messageSource = ATMessageSource::AT_SIM;
-    }
-  }
+  // if (comConfig.simEnabled && serialAnswer[0] == 0)
+  // {
+  //   if (simSerial.available() > 0)
+  //   {
+  //     Serial.print(F("AT+LOG=SIM: "));
+  //     readSerial(&simSerial, 1000);
+  //     messageSource = ATMessageSource::AT_SIM;
+  //   }
+  // }
   if (comConfig.wifiEnabled && serialAnswer[0] == 0)
   {
     if (wifiSerial.available() > 0)
@@ -968,6 +1168,16 @@ void loop()
   {
     while (gpsSerial.available() > 0)
       gps.encode(gpsSerial.read());
+
+    if (gps.location.isValid())
+    {
+      if (gps.location.lat() != 0 && gps.location.lng() != 0)
+      {
+        comConfig.lastLocation.lat = gps.location.lat();
+        comConfig.lastLocation.lon = gps.location.lng();
+        saveComConfig();
+      }
+    }
   }
 
   if (millis() >= nextSendTime)
@@ -979,4 +1189,6 @@ void loop()
   {
     resetLoraData();
   }
+
+  delay(50);
 }
