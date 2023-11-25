@@ -46,7 +46,7 @@ const int bleLedPin = 9;
 char serialAnswer[700];
 String data;
 ATMessageSource messageSource;
-char dataBuffer[500], loraBuffer[500], wifiBuffer[500], simBuffer[500];
+char dataBuffer[500], loraBuffer[500], wifiBuffer[500], simBuffer[500], ethBuffer[500];
 int windSpdSensorVal[maxWindSensor]; // Wind speed sensor output
 int windDirSensorVal[maxWindSensor]; // Wind direction sensor output
 float windSpeed[maxWindSensor];
@@ -75,7 +75,6 @@ unsigned long loraSendTimeout = 0;
 // Wifi Configuration
 bool wifiSending = false;
 int wifiCurrentStep = 0;
-unsigned long wifiSendTimeout = 0;
 
 // Ble Configuration
 bool bleConnected = false;
@@ -495,10 +494,11 @@ void sendData()
   getDataString();
 
   memcpy(dataBuffer, data.c_str(), data.length());
-  if (comConfig.bleEnabled)
-  {
-    // Send data to BLE
-  }
+  // BLE send data with their own interval
+  // if (comConfig.bleEnabled)
+  // {
+  //   // Send data to BLE
+  // }
   if (comConfig.simEnabled)
   {
     // Send data to SIM
@@ -513,7 +513,6 @@ void sendData()
     wifiSending = true;
     memset(wifiBuffer, 0, sizeof(wifiBuffer));
     memcpy(wifiBuffer, data.c_str(), data.length());
-    wifiSendTimeout = millis() + 120000;
     sendWifiData();
   }
   if (comConfig.loraEnabled)
@@ -529,6 +528,9 @@ void sendData()
   if (comConfig.ethEnabled)
   {
     // Send data to ETH
+    memset(ethBuffer, 0, sizeof(ethBuffer));
+    memcpy(ethBuffer, data.c_str(), data.length());
+    sendEthData();
   }
 }
 
@@ -712,6 +714,73 @@ void sendSimData()
   http.stop();
   Serial.println(F("AT+LOG=Server disconnected"));
   sim800l->gprsDisconnect();
+}
+
+void resetEthData()
+{
+  ethSending = false;
+  memset(ethBuffer, 0, sizeof(ethBuffer));
+}
+
+void sendEthData()
+{
+  Serial.print(F("AT+LOG=Connecting to "));
+  Serial.println(serverHost);
+
+  EthernetClient ethClient;
+  HttpClient http(ethClient, serverHost, 80);
+  http.setTimeout(60000);
+  http.connectionKeepAlive();
+
+  int err = http.post(serverAddWeatherDataPath + String("?stationId=") + String(comConfig.stationId) + String("&source=eth"), "application/json", ethBuffer);
+  if (err != 0)
+  {
+    Serial.println(F("failed to connect"));
+    ethClient.stop();
+    delay(10000);
+    return;
+  }
+
+  int status = http.responseStatusCode();
+  Serial.print(F("AT+LOG=Response status code: "));
+  Serial.println(status);
+  if (status < 100)
+  {
+    Serial.println(F("AT+LOG=Request failed!"));
+    ethClient.stop();
+    http.stop();
+    return;
+  }
+  if (!status)
+  {
+    delay(10000);
+    return;
+  }
+
+  // Serial.println(F("Response Headers:"));
+  // while (http.headerAvailable())
+  // {
+  //   String headerName = http.readHeaderName();
+  //   String headerValue = http.readHeaderValue();
+  //   Serial.println("    " + headerName + " : " + headerValue);
+  // }
+
+  int length = http.contentLength();
+  if (length >= 0)
+  {
+    Serial.print(F("AT+LOG=Content length is: "));
+    Serial.println(length);
+  }
+  if (http.isResponseChunked())
+  {
+    Serial.println(F("AT+LOG=The response is chunked"));
+  }
+  Serial.print(F("AT+LOG=Response:"));
+  Serial.println(http.responseBody());
+
+  // Shutdown
+  http.stop();
+  Serial.println(F("AT+LOG=Server disconnected"));
 }
 
 void processATCommand()
