@@ -24,7 +24,7 @@ std::unique_ptr<BearSSL::WiFiClientSecure> client(new BearSSL::WiFiClientSecure)
 void setup()
 {
   pinMode(LED_BUILTIN, OUTPUT); // Set LED_BUILTIN pin as OUTPUT
-  Serial.begin(9600);
+  Serial.begin(38400);
   Wire.begin(4, 5); // Initialize I2C communication (SDA - GPIO4, SCL - GPIO5)
   WiFi.hostname("WeatherStation");
   client->setInsecure();
@@ -168,6 +168,7 @@ void executeCommand(const char *command)
     String headerValue = headerName.substring(colonIndex + 1);
     headerName = headerName.substring(0, colonIndex);
     http.addHeader(headerName.c_str(), headerValue.c_str());
+    sendResponse("OK");
   }
   else if (strcmp(command, "AT+GET") == 0)
   {
@@ -191,6 +192,7 @@ void executeCommand(const char *command)
   {
     // Read the response from the HTTP request
     String response = http.getString();
+    response.replace("\n", "\\n");
     sendResponse(response.c_str());
   }
   else if (strcmp(command, "AT+ENDREQ") == 0)
