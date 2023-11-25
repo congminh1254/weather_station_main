@@ -4,10 +4,10 @@
 // #endif
 
 #include <SPI.h>
+#include <TinyGsmClient.h>
 #include <Ethernet.h>
 #include <SoftwareSerial.h>
 #include <EEPROM.h>
-#include <TinyGsmClient.h>
 #include <ArduinoHttpClient.h>
 
 #include <Wire.h>
@@ -38,11 +38,13 @@ static const uint32_t GPSBaud = 9600;
 TinyGPSPlus gps;
 SoftwareSerial wifiSerial(12, 13); // RX, TX
 SoftwareSerial simSerial(10, 11);  // RX, TX
+const int bleLedPin = 9;
 
 // D0 - D5: UART
 #define DHT_TYPE DHT22
 
 char serialAnswer[700];
+String data;
 ATMessageSource messageSource;
 char dataBuffer[500], loraBuffer[500], wifiBuffer[500], simBuffer[500];
 int windSpdSensorVal[maxWindSensor]; // Wind speed sensor output
@@ -52,7 +54,7 @@ char windDirection[maxWindSensor][3];
 float humidity[maxDhtSensor];
 float temperature[maxDhtSensor];
 
-unsigned long nextSendTime = 0, readSensorTime = 0;
+unsigned long nextSendTime = 0, readSensorTime = 0, readBleLedTime = 0;
 unsigned long readTimeout = 0;
 int readTried = 0;
 int serialAvailable = 0;
@@ -74,6 +76,11 @@ unsigned long loraSendTimeout = 0;
 bool wifiSending = false;
 int wifiCurrentStep = 0;
 unsigned long wifiSendTimeout = 0;
+
+// Ble Configuration
+bool bleConnected = false;
+bool bleLedOn = false;
+bool bleSendAllConfig = true;
 
 byte ethMac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
 
@@ -120,9 +127,9 @@ struct SimConfig
 };
 struct LoraConfig
 {
-  char devEui[16];
-  char appEui[16];
-  char appKey[32];
+  char devEui[17];
+  char appEui[17];
+  char appKey[33];
 };
 struct LocationInfo
 {
@@ -138,6 +145,7 @@ struct LocationInfo
 struct CommunicationConfig
 {
   bool initialized;
+  bool useGps;
   bool bleEnabled;
   bool simEnabled;
   SimConfig simConfig;
@@ -170,6 +178,16 @@ struct DeviceState
 SensorsConfig sensorConfig;
 CommunicationConfig comConfig;
 DeviceState deviceState;
+
+void (*resetFunc)(void) = 0;
+
+String IpAddress2String(const IPAddress &ipAddress)
+{
+  return String(ipAddress[0]) + String(".") +
+         String(ipAddress[1]) + String(".") +
+         String(ipAddress[2]) + String(".") +
+         String(ipAddress[3]);
+}
 
 void resetData()
 {
@@ -233,6 +251,105 @@ void saveSensorConfig()
 void saveComConfig()
 {
   EEPROM.put(sizeof(sensorConfig), comConfig);
+}
+
+// Set config with name and value
+void setConfig(String name, String value)
+{
+  if (name == "stationId")
+  {
+    comConfig.stationId = value.toInt();
+  }
+  else if (name == "sendInterval")
+  {
+    comConfig.sendInterval = value.toInt();
+  }
+  else if (name == "bleEnabled")
+  {
+    comConfig.bleEnabled = value.toInt();
+  }
+  else if (name == "sim.enabled")
+  {
+    comConfig.simEnabled = value.toInt();
+  }
+  else if (name == "wifi.enabled")
+  {
+    comConfig.wifiEnabled = value.toInt();
+  }
+  else if (name == "lora.enabled")
+  {
+    comConfig.loraEnabled = value.toInt();
+  }
+  else if (name == "eth.enabled")
+  {
+    comConfig.ethEnabled = value.toInt();
+  }
+  else if (name == "location.gps")
+  {
+    comConfig.useGps = value.toInt();
+  }
+  else if (name == "location.lat")
+  {
+    comConfig.lastLocation.lat = value.toDouble();
+  }
+  else if (name == "location.lon")
+  {
+    comConfig.lastLocation.lon = value.toDouble();
+  }
+  else if (name == "DHT_ENABLED")
+  {
+    int index = value.substring(0, 1).toInt();
+    sensorConfig.DHT_ENABLED[index] = value.substring(2).toInt();
+  }
+  else if (name == "windDirPin")
+  {
+    int index = value.substring(0, 1).toInt();
+    sensorConfig.windDirPin[index] = value.substring(2).toInt();
+  }
+  else if (name == "windSpdPin")
+  {
+    int index = value.substring(0, 1).toInt();
+    sensorConfig.windSpdPin[index] = value.substring(2).toInt();
+  }
+  else if (name == "wifi.ssid")
+  {
+    strcpy(comConfig.wifiConfig.ssid, value.c_str());
+  }
+  else if (name == "wifi.pwd")
+  {
+    strcpy(comConfig.wifiConfig.pwd, value.c_str());
+  }
+  else if (name == "sim.apn")
+  {
+    strcpy(comConfig.simConfig.apn, value.c_str());
+  }
+  else if (name == "sim.user")
+  {
+    strcpy(comConfig.simConfig.user, value.c_str());
+  }
+  else if (name == "sim.pwd")
+  {
+    strcpy(comConfig.simConfig.pwd, value.c_str());
+  }
+  else if (name == "lora.devEui")
+  {
+    strcpy(comConfig.loraConfig.devEui, value.c_str());
+  }
+  else if (name == "lora.appEui")
+  {
+    strcpy(comConfig.loraConfig.appEui, value.c_str());
+  }
+  else if (name == "lora.appKey")
+  {
+    strcpy(comConfig.loraConfig.appKey, value.c_str());
+  }
+  else
+  {
+    Serial.println("AT+LOG=Unknown config name: " + name);
+    return;
+  }
+  saveComConfig();
+  Serial.println("AT+LOG=Set config " + name + " to " + value);
 }
 
 void setWindDirection(int set, int value)
@@ -303,12 +420,15 @@ LocationInfo getGps()
     location.lat = comConfig.lastLocation.lat;
     location.lon = comConfig.lastLocation.lon;
   }
+  if (isnan(location.lat) || isnan(location.lon))
+  {
+    location.lat = 0;
+    location.lon = 0;
+  }
   return location;
 }
 
-// struct tm t = {0};
-
-void sendData()
+void getDataString()
 {
   printGps();
 
@@ -324,7 +444,7 @@ void sendData()
 
   // Without timestamp
   LocationInfo location = getGps();
-  String data = "{\"loc\":{\"lat\":" + String(location.lat, 6) + ",\"lon\":" + String(location.lon, 6) + "},\"data\":{";
+  data = "{\"loc\":{\"lat\":" + String(location.lat, 6) + ",\"lon\":" + String(location.lon, 6) + "},\"data\":{";
 
   data += "\"ws\":[";
   for (int i = 0; i < 8; i++)
@@ -368,6 +488,11 @@ void sendData()
   }
   data += "]}}";
   Serial.println("AT+DATA=" + data);
+}
+
+void sendData()
+{
+  getDataString();
 
   memcpy(dataBuffer, data.c_str(), data.length());
   if (comConfig.bleEnabled)
@@ -619,6 +744,12 @@ void processATCommand()
         Serial.println(F("AT+LOG=Failed to send LORA data, cancelling"));
         resetLoraData();
       }
+      else if (strstr(serialAnswer, "please join") != NULL)
+      {
+        Serial.println(F("AT+LOG=LoRa not joined"));
+        deviceState.loraInitialized = loraJoinNetwork();
+        resetLoraData();
+      }
       else
       {
         // Another message, can be ignored
@@ -632,6 +763,70 @@ void processATCommand()
     {
       wifiCurrentStep++;
       sendWifiData();
+    }
+  }
+  else if (messageSource == ATMessageSource::AT_BLE)
+  {
+    // AT+ALLCONFIG
+    if (strstr(serialAnswer, "AT+ALLCONFIG") != NULL)
+    {
+      sendConfigBLE();
+    }
+    else if (strstr(serialAnswer, "AT+CONFIG=") != NULL)
+    {
+      // AT+CONFIG=station.id=1234
+      // AT+CONFIG=station.sendInterval=60000
+      // AT+CONFIG=ble.enabled=1
+      // AT+CONFIG=location.connected=1
+      // AT+CONFIG=location.lat=10.123456
+      // AT+CONFIG=location.lon=106.123456
+      // AT+CONFIG=location.gps=1
+      // AT+CONFIG=wifi.enabled=1
+      // AT+CONFIG=wifi.connected=1
+      // AT+CONFIG=wifi.ssid=ssid
+      // AT+CONFIG=wifi.pwd=pwd
+      // AT+CONFIG=sim.enabled=1
+      // AT+CONFIG=sim.connected=1
+      // AT+CONFIG=sim.apn=apn
+      // AT+CONFIG=sim.user=user
+      // AT+CONFIG=sim.pwd=pwd
+      // AT+CONFIG=lora.enabled=1
+      // AT+CONFIG=lora.connected=1
+      // AT+CONFIG=lora.devEui=6081F9F7B8151EE5
+      // AT+CONFIG=lora.appEui=6081F9E9F6B003F9
+      // AT+CONFIG=lora.appKey=55F5B1B2CE8DED19A3DB57FD976D9C05
+      // AT+CONFIG=eth.enabled=1
+      String serialStr = String(serialAnswer).substring(10);
+      String configName = serialStr.substring(0, serialStr.indexOf('='));
+      String configValue = serialStr.substring(serialStr.indexOf('=') + 1);
+      setConfig(configName, configValue);
+      bleSerial.println("AT+CONFIG=" + configName + "=" + configValue);
+      bleSerial.println("AT+CONFIG=done");
+    }
+    else if (strstr(serialAnswer, "AT+RESET") != NULL)
+    {
+      resetFunc();
+    }
+    else if (strstr(serialAnswer, "AT+FACTORYRESET") != NULL)
+    {
+      // Set test config
+      loadDefaultSensorConfig();
+      sensorConfig.DHT_ENABLED[0] = true;
+      sensorConfig.windSpdPin[0] = A1;
+      sensorConfig.windDirPin[0] = A0;
+      saveSensorConfig();
+
+      loadDefaultCommunicationConfig();
+      comConfig.lastLocation.lat = 10.123456;
+      comConfig.lastLocation.lon = 106.123456;
+      comConfig.useGps = true;
+      comConfig.bleEnabled = true;
+      comConfig.simEnabled = false;
+      comConfig.wifiEnabled = true;
+      comConfig.loraEnabled = true;
+      comConfig.ethEnabled = true;
+      saveComConfig();
+      resetFunc();
     }
   }
 }
@@ -717,82 +912,140 @@ void setupSimModule()
   }
 }
 
-void sendSimGetRequest(char *server, char *resource, int timeout)
+bool loraJoinNetwork()
 {
-  // char *apn = "internet";
-  // Serial.print(F("AT+LOG=Connecting to "));
-  // Serial.print(apn);
-  // if (!sim800l->gprsConnect(apn, "", ""))
-  // {
-  //   Serial.println(" fail");
-  //   return;
-  // }
-  // Serial.println(" success");
-  // if (sim800l->isGprsConnected())
-  // {
-  //   Serial.println("AT+LOG=GPRS connected");
-  // }
-  // Serial.print(F("AT+LOG=Local IP: "));
-  // Serial.println(sim800l->getLocalIP());
-  // Serial.print(F("AT+LOG=Connecting to "));
-  // Serial.print(server);
+  loraSerial.end();
+  loraSerial.begin(9600);
+  Serial.println(F("AT+LOG=Initializing LORA"));
+  loraSerial.print("AT\n");
+  readSerial(&loraSerial, 1000);
+  Serial.print(F("AT+LOG=LORA response: "));
+  Serial.println(serialAnswer);
+  if (strstr(serialAnswer, "OK") == NULL)
+  {
+    Serial.println(F("AT+LOG=Failed to initialize LORA"));
+    return false;
+  }
+  loraSerial.print("AT+JOIN\n");
+  readSerial(&loraSerial, 1000);
+  readTried = 1;
+  while (readTried < 10 && strstr(serialAnswer, "Joined") == NULL && strstr(serialAnswer, "joined") == NULL && strstr(serialAnswer, "failed") == NULL)
+  {
+    if (strstr(serialAnswer, "busy") != NULL)
+    {
+      Serial.println(F("AT+LOG=LORA busy, retrying"));
+      loraSerial.print("AT+RESET\n");
+      readSerial(&loraSerial, 1000);
+      return loraJoinNetwork();
+    }
+    Serial.print(F("AT+LOG=LORA response: "));
+    Serial.println(serialAnswer);
+    readSerial(&loraSerial, 3000);
+    readTried++;
+  }
+  Serial.println(serialAnswer);
+  if (strstr(serialAnswer, "failed") != NULL)
+  {
+    Serial.println(F("AT+LOG=LORA initialize failed!"));
+  }
+  if (strstr(serialAnswer, "Joined") != NULL || strstr(serialAnswer, "joined") != NULL)
+  {
+    Serial.println(F("AT+LOG=LORA initialized"));
+    return true;
+  }
+  return false;
+}
 
-  // HttpClient http(*sim800lclient, server, 80);
-  // http.setTimeout(timeout);
+bool bleInit()
+{
+  bleSerial.end();
+  bleSerial.begin(9600);
+  pinMode(bleLedPin, INPUT_PULLUP);
+  Serial.println(F("AT+LOG=Initializing BLE"));
+  bleSerial.print("AT");
+  delay(1000);
+  readSerial(&bleSerial, 1000);
+  Serial.print(F("AT+LOG=BLE response: "));
+  Serial.println(serialAnswer);
+  if (strstr(serialAnswer, "OK") == NULL)
+  {
+    Serial.println(F("AT+LOG=Failed to initialize BLE"));
+    return false;
+  }
+  else
+  {
+    Serial.println(F("AT+LOG=BLE initialized"));
+    return true;
+  }
+}
 
-  // http.connectionKeepAlive();
+void sendConfigBLE()
+{
+  bleSendAllConfig = false;
+  Serial.println(F("AT+LOG=Sending config to BLE"));
 
-  // int err = http.get(resource);
-  // if (err != 0)
-  // {
-  //   Serial.println(F("failed to connect"));
-  //   sim800lclient->stop();
-  //   delay(10000);
-  //   return;
-  // }
+  // CONFIG=station.id=1234
+  // CONFIG=station.sendInterval=60000
+  // CONFIG=ble.enabled=1
+  // CONFIG=location.connected=1
+  // CONFIG=location.lat=10.123456
+  // CONFIG=location.lon=106.123456
+  // CONFIG=location.gps=1
+  // CONFIG=wifi.enabled=1
+  // CONFIG=wifi.connected=1
+  // CONFIG=wifi.ssid=ssid
+  // CONFIG=wifi.pwd=pwd
+  // CONFIG=sim.enabled=1
+  // CONFIG=sim.connected=1
+  // CONFIG=sim.apn=apn
+  // CONFIG=sim.user=user
+  // CONFIG=sim.pwd=pwd
+  // CONFIG=lora.enabled=1
+  // CONFIG=lora.connected=1
+  // CONFIG=lora.devEui=devEui
+  // CONFIG=lora.appEui=appEui
+  // CONFIG=lora.appKey=appKey
+  // CONFIG=eth.enabled=1
+  // CONFIG=eth.connected=1
+  // CONFIG=eth.ip=ip
+  // CONFIG=eth.subnet=subnet
+  // CONFIG=eth.gateway=gateway
+  // CONFIG=done
 
-  // int status = http.responseStatusCode();
-  // Serial.print(F("AT+LOG=Response status code: "));
-  // Serial.println(status);
-  // if (status < 100)
-  // {
-  //   Serial.println(F("AT+LOG=Request failed!"));
-  //   sim800lclient->stop();
-  //   http.stop();
-  //   sim800l->gprsDisconnect();
-  //   return;
-  // }
-  // if (!status)
-  // {
-  //   delay(10000);
-  //   return;
-  // }
-
-  // Serial.println(F("Response Headers:"));
-  // while (http.headerAvailable())
-  // {
-  //   String headerName = http.readHeaderName();
-  //   String headerValue = http.readHeaderValue();
-  //   Serial.println("    " + headerName + " : " + headerValue);
-  // }
-
-  // int length = http.contentLength();
-  // if (length >= 0)
-  // {
-  //   Serial.print(F("Content length is: "));
-  //   Serial.println(length);
-  // }
-  // if (http.isResponseChunked())
-  // {
-  //   Serial.println(F("The response is chunked"));
-  // }
-  // Serial.println(F("Response:"));
-  // Serial.println(http.responseBody());
-
-  // // Shutdown
-  // http.stop();
-  // Serial.println(F("Server disconnected"));
-  // sim800l->gprsDisconnect();
+  bleSerial.println("AT+CONFIG=station.id=" + String(comConfig.stationId));
+  bleSerial.println("AT+CONFIG=station.sendInterval=" + String(comConfig.sendInterval));
+  bleSerial.println("AT+CONFIG=ble.enabled=" + String(comConfig.bleEnabled));
+  bleSerial.println("AT+CONFIG=location.connected=" + String(deviceState.gpsInitialized));
+  bleSerial.println("AT+CONFIG=location.lat=" + String(comConfig.lastLocation.lat, 6));
+  bleSerial.println("AT+CONFIG=location.lon=" + String(comConfig.lastLocation.lon, 6));
+  bleSerial.println("AT+CONFIG=location.gps=" + String(comConfig.useGps));
+  bleSerial.println("AT+CONFIG=wifi.enabled=" + String(comConfig.wifiEnabled));
+  bleSerial.println("AT+CONFIG=wifi.connected=" + String(deviceState.wifiInitialized));
+  bleSerial.println("AT+CONFIG=wifi.ssid=" + String(comConfig.wifiConfig.ssid));
+  bleSerial.println("AT+CONFIG=wifi.pwd=" + String(comConfig.wifiConfig.pwd));
+  bleSerial.println("AT+CONFIG=sim.enabled=" + String(comConfig.simEnabled));
+  bleSerial.println("AT+CONFIG=sim.connected=" + String(deviceState.simInitialized));
+  bleSerial.println("AT+CONFIG=sim.apn=" + String(comConfig.simConfig.apn));
+  bleSerial.println("AT+CONFIG=sim.user=" + String(comConfig.simConfig.user));
+  bleSerial.println("AT+CONFIG=sim.pwd=" + String(comConfig.simConfig.pwd));
+  bleSerial.println("AT+CONFIG=lora.enabled=" + String(comConfig.loraEnabled));
+  bleSerial.println("AT+CONFIG=lora.connected=" + String(deviceState.loraInitialized));
+  bleSerial.print("AT+CONFIG=lora.devEui=");
+  bleSerial.println(comConfig.loraConfig.devEui);
+  bleSerial.print("AT+CONFIG=lora.appEui=");
+  bleSerial.println(comConfig.loraConfig.appEui);
+  bleSerial.print("AT+CONFIG=lora.appKey=");
+  bleSerial.println(comConfig.loraConfig.appKey);
+  bleSerial.println("AT+CONFIG=eth.enabled=" + String(comConfig.ethEnabled));
+  bleSerial.println("AT+CONFIG=eth.connected=" + String(deviceState.ethInitialized));
+  if (deviceState.ethInitialized)
+  {
+    bleSerial.println("AT+CONFIG=eth.ip=" + IpAddress2String(Ethernet.localIP()));
+    bleSerial.println("AT+CONFIG=eth.subnet=" + IpAddress2String(Ethernet.subnetMask()));
+    bleSerial.println("AT+CONFIG=eth.gateway=" + IpAddress2String(Ethernet.gatewayIP()));
+    bleSerial.println("AT+CONFIG=eth.dns=" + IpAddress2String(Ethernet.dnsServerIP()));
+  }
+  bleSerial.println("AT+CONFIG=done");
 }
 
 void clearLCDLine(int line)
@@ -805,20 +1058,23 @@ void setup()
 {
   readConfig();
   resetData();
-  // Set test config
-  loadDefaultSensorConfig();
-  sensorConfig.DHT_ENABLED[0] = true;
-  sensorConfig.windSpdPin[0] = A1;
-  sensorConfig.windDirPin[0] = A0;
-  saveSensorConfig();
+  // // Set test config
+  // loadDefaultSensorConfig();
+  // sensorConfig.DHT_ENABLED[0] = true;
+  // sensorConfig.windSpdPin[0] = A1;
+  // sensorConfig.windDirPin[0] = A0;
+  // saveSensorConfig();
 
-  loadDefaultCommunicationConfig();
-  comConfig.bleEnabled = true;
-  comConfig.simEnabled = false;
-  comConfig.wifiEnabled = true;
-  comConfig.loraEnabled = true;
-  comConfig.ethEnabled = false;
-  saveComConfig();
+  // loadDefaultCommunicationConfig();
+  // // comConfig.lastLocation.lat = 10.123456;
+  // // comConfig.lastLocation.lon = 106.123456;
+  // comConfig.useGps = true;
+  // comConfig.bleEnabled = true;
+  // comConfig.simEnabled = false;
+  // comConfig.wifiEnabled = true;
+  // comConfig.loraEnabled = true;
+  // comConfig.ethEnabled = true;
+  // saveComConfig();
 
   // Initialize LCD
   lcd.init();
@@ -829,7 +1085,7 @@ void setup()
   clearLCDLine(1);
   lcd.setCursor(0, 1);
   lcd.print("Initializing...");
-  
+
   // Initialize sensors
   Wire.begin();
   for (auto &sensor : dht)
@@ -884,22 +1140,7 @@ void setup()
     clearLCDLine(1);
     lcd.setCursor(0, 1);
     lcd.print("Initializing BLE");
-    bleSerial.begin(9600);
-    Serial.println(F("AT+LOG=Initializing BLE"));
-    bleSerial.println("AT");
-    delay(1000);
-    readSerial(&bleSerial, 1000);
-    Serial.print(F("AT+LOG=BLE response: "));
-    Serial.println(serialAnswer);
-    if (strstr(serialAnswer, "OK") == NULL)
-    {
-      Serial.println(F("AT+LOG=Failed to initialize BLE"));
-    }
-    else
-    {
-      Serial.println(F("AT+LOG=BLE initialized"));
-      deviceState.bleInitialized = true;
-    }
+    deviceState.bleInitialized = bleInit();
   }
   delay(1000);
 
@@ -910,7 +1151,7 @@ void setup()
 
     lcd.print("Initializing SIM");
     simSerial.begin(9600);
-    
+
     Serial.println(F("AT+LOG=Initializing SIM"));
     setupSimModule();
     Serial.println(F("AT+LOG=SIM initialized"));
@@ -974,39 +1215,7 @@ void setup()
     clearLCDLine(1);
     lcd.setCursor(0, 1);
     lcd.print("Initializing LORA");
-    loraSerial.begin(9600);
-    Serial.println(F("AT+LOG=Initializing LORA"));
-    loraSerial.print("AT\n");
-    readSerial(&loraSerial, 1000);
-    Serial.print(F("AT+LOG=LORA response: "));
-    Serial.println(serialAnswer);
-    if (strstr(serialAnswer, "OK") == NULL)
-    {
-      Serial.println(F("AT+LOG=Failed to initialize LORA"));
-    }
-    else
-    {
-      loraSerial.print("AT+JOIN\n");
-      readSerial(&loraSerial, 1000);
-      readTried = 1;
-      while (readTried < 10 && strstr(serialAnswer, "Joined") == NULL && strstr(serialAnswer, "joined") == NULL && strstr(serialAnswer, "failed") == NULL)
-      {
-        Serial.print(F("AT+LOG=LORA response: "));
-        Serial.println(serialAnswer);
-        readSerial(&loraSerial, 3000);
-        readTried++;
-      }
-      Serial.println(serialAnswer);
-      if (strstr(serialAnswer, "failed") != NULL)
-      {
-        Serial.println(F("AT+LOG=LORA initialize failed!"));
-      }
-      if (strstr(serialAnswer, "Joined") != NULL || strstr(serialAnswer, "joined") != NULL)
-      {
-        Serial.println(F("AT+LOG=LORA initialized"));
-        deviceState.loraInitialized = true;
-      }
-    }
+    deviceState.loraInitialized = loraJoinNetwork();
   }
 
   lcd.setCursor(0, 1);
@@ -1126,6 +1335,7 @@ void loop()
       Serial.print(F("AT+LOG=BLE: "));
       readSerial(&bleSerial, 1000);
       messageSource = ATMessageSource::AT_BLE;
+      bleSerial.println("OK");
     }
   }
   // if (comConfig.simEnabled && serialAnswer[0] == 0)
@@ -1188,6 +1398,28 @@ void loop()
   if (millis() >= loraSendTimeout && loraSending)
   {
     resetLoraData();
+  }
+  if (millis() >= readBleLedTime)
+  {
+    readBleLedTime = millis() + 1000;
+    if (digitalRead(bleLedPin) != bleLedOn)
+    {
+      bleLedOn = !bleLedOn;
+      bleConnected = false;
+    }
+    else if (bleLedOn)
+    {
+      bleConnected = true;
+      if (bleSendAllConfig)
+      {
+        sendConfigBLE();
+      }
+      else
+      {
+        getDataString();
+        bleSerial.println("AT+DATA=" + data);
+      }
+    }
   }
 
   delay(50);
