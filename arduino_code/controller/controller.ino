@@ -55,6 +55,7 @@ float humidity[maxDhtSensor];
 float temperature[maxDhtSensor];
 
 unsigned long nextSendTime = 0, readSensorTime = 0, readBleLedTime = 0;
+unsigned long startSendWifiTime = 0, startSendSimTime = 0, startSendLoraTime = 0, startSendEthTime = 0;
 unsigned long readTimeout = 0;
 int readTried = 0;
 int serialAvailable = 0;
@@ -523,6 +524,7 @@ void sendData()
     memset(loraBuffer, 0, sizeof(loraBuffer));
     memcpy(loraBuffer, data.c_str(), data.length());
     loraSendTimeout = millis() + 120000;
+    startSendLoraTime = millis();
     sendLoraData();
   }
   if (comConfig.ethEnabled)
@@ -548,7 +550,6 @@ void sendLoraData()
   // with format: x:y:deviceId:z with x is the current position of message,
   // y is the total length of message, z is the message content
   // length of each message is upto 36 bytes
-
   int totalLength = strlen(dataBuffer);
   int timeTried = 0;
 
@@ -589,6 +590,8 @@ void sendLoraData()
 
   if (loraCurrentPos >= totalLength)
   {
+    Serial.print(F("AT+LOG=LORA sent in (ms):"));
+    Serial.println(millis() - startSendLoraTime);
     resetLoraData();
   }
 }
@@ -605,6 +608,7 @@ void sendWifiData()
   switch (wifiCurrentStep)
   {
   case 0:
+    startSendWifiTime = millis();
     Serial.println(F("AT+LOG=Sending WIFI data"));
     wifiSending = true;
     wifiSerial.print("AT+NEWREQ\n");
@@ -628,6 +632,8 @@ void sendWifiData()
     wifiSerial.print("AT+ENDREQ\n");
     break;
   case 6:
+    Serial.print(F("AT+LOG=WIFI sent in (ms):"));
+    Serial.println(millis() - startSendWifiTime);
     Serial.println(F("AT+LOG=WIFI data sent"));
     resetWifiData();
     break;
@@ -642,6 +648,7 @@ void resetSimData()
 
 void sendSimData()
 {
+  startSendSimTime = millis();
   Serial.print(F("AT+LOG=Connecting to "));
   Serial.println(comConfig.simConfig.apn);
   if (!sim800l->gprsConnect(comConfig.simConfig.apn, comConfig.simConfig.user, comConfig.simConfig.pwd))
@@ -709,6 +716,8 @@ void sendSimData()
   }
   Serial.print(F("AT+LOG=Response:"));
   Serial.println(http.responseBody());
+  Serial.print(F("AT+LOG=SIM sent in (ms):"));
+  Serial.println(millis() - startSendSimTime);
 
   // Shutdown
   http.stop();
@@ -718,12 +727,12 @@ void sendSimData()
 
 void resetEthData()
 {
-  ethSending = false;
   memset(ethBuffer, 0, sizeof(ethBuffer));
 }
 
 void sendEthData()
 {
+  startSendEthTime = millis();
   Serial.print(F("AT+LOG=Connecting to "));
   Serial.println(serverHost);
 
@@ -756,6 +765,8 @@ void sendEthData()
     delay(10000);
     return;
   }
+  Serial.print(F("AT+LOG=ETH sent in (ms):"));
+  Serial.println(millis() - startSendEthTime);
 
   // Serial.println(F("Response Headers:"));
   // while (http.headerAvailable())
